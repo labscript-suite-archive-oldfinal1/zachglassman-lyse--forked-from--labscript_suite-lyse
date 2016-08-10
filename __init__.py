@@ -11,8 +11,6 @@
 #                                                                   #
 #####################################################################
 
-spinning_top = False
-
 from dataframe_utilities import get_series_from_shot as _get_singleshot
 from dataframe_utilities import dict_diff
 import os
@@ -32,13 +30,31 @@ from zprocess import zmq_get
 
 __version__ = '2.0.0'
 
+try:
+    from labscript_utils import check_version
+except ImportError:
+    raise ImportError('Require labscript_utils > 2.1.0')
+
+# allow pandas v0.15.0 to v0.16.x inclusive
+check_version('pandas', '0.15.0', '0.17')
+
+# If running stand-alone, and not from within lyse, the below two variables
+# will be as follows. Otherwise lyse will override them with spinning_top =
+# True and path <name of hdf5 file being analysed>:
+spinning_top = False
+
+if len(sys.argv) > 1:
+    path = sys.argv[1]
+else:
+    path = None
+
+
 def data(filepath=None, host='localhost', timeout=5):
     if filepath is not None:
         return _get_singleshot(filepath)
     else:
         port = 42519
         df = zmq_get(port, host, 'get dataframe', timeout)
-        df = df.convert_objects(convert_numeric=True, convert_dates=False)
         try:
             padding = ('',)*(df.columns.nlevels - 1)
             df.set_index([('sequence',) + padding,('run time',) + padding], inplace=True, drop=False)

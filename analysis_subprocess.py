@@ -51,6 +51,47 @@ import qtutils.icons
 
 from labscript_utils.modulewatcher import ModuleWatcher
 
+class _DeprecationDict(dict):
+    """Dictionary that spouts deprecation warnings when you try to access some
+    keys."""
+    def __init__(self, *args, **kwargs):
+        self.deprecation_messages = {} # To be added to after the deprecated items are added to the dict.
+        dict.__init__(self, *args, **kwargs)
+
+    def __getitem__(self, key):
+        if key in self.deprecation_messages:
+            import warnings
+            import linecache
+            # DeprecationWarnings are ignored by default. Clear the filter so
+            # they are not:
+            previous_warning_filters = warnings.filters[:]
+            try:
+                warnings.resetwarnings()
+                # Hacky stuff to get it to work from within execfile() with
+                # correct line data:
+                linecache.clearcache()
+                caller = sys._getframe(1)
+                globals = caller.f_globals
+                lineno = caller.f_lineno
+                module = globals['__name__']
+                filename = globals.get('__file__')
+                fnl = filename.lower()
+                if fnl.endswith((".pyc", ".pyo")):
+                    filename = filename[:-1]
+                message = self.deprecation_messages[key]
+                warnings.warn_explicit(message, DeprecationWarning, filename, lineno, module)
+            finally:
+                # Restore the warnings filter:
+                warnings.filters[:] = previous_warning_filters
+        return dict.__getitem__(self, key)
+
+    def __setitem__(self, key, value):
+        if key in self.deprecation_messages:
+            # No longer deprecated if the user puts something in place of the
+            # originally deprecated item:
+            del self.deprecation_messages[key]
+        return dict.__setitem__(self, key, value)
+
 
 def set_win_appusermodel(window_id):
     from labscript_utils.winshell import set_appusermodel, appids, app_descriptions
@@ -63,14 +104,11 @@ def set_win_appusermodel(window_id):
     set_appusermodel(window_id, appids['lyse'], icon_path, relaunch_command, relaunch_display_name)
     
     
-class PlotWindow(QtGui.QDialog):
+class PlotWindow(QtGui.QWidget):
     # A signal for when the window manager has created a new window for this widget:
     newWindow = Signal(int)
     close_signal = Signal()
 
-    def __init__(self):
-        QtGui.QWidget.__init__(self, None, QtCore.Qt.WindowSystemMenuHint | QtCore.Qt.WindowTitleHint)
-        
     def event(self, event):
         result = QtGui.QWidget.event(self, event)
         if event.type() == QtCore.QEvent.WinIdChange:
@@ -78,7 +116,6 @@ class PlotWindow(QtGui.QDialog):
         return result
 
     def closeEvent(self, event):
-        # self.close_signal.emit()
         self.hide()
         event.ignore()
         
@@ -94,7 +131,7 @@ class Plot(object):
 
         self.set_window_title(identifier, filepath)
 
-        figure.tight_layout()
+        # figure.tight_layout()
         self.figure = figure
         self.canvas = FigureCanvas(figure)
         self.navigation_toolbar = NavigationToolbar(self.canvas, self.ui)
@@ -223,7 +260,17 @@ class AnalysisWorker(object):
         self.pre_analysis_plot_actions()
 
         # The namespace the routine will run in:
-        sandbox = {'path':path, '__file__':self.filepath, '__name__':'__main__', '__file__': self.filepath}
+        sandbox = _DeprecationDict(path=path,
+                                   __name__='__main__',
+                                   __file__= self.filepath)
+        # path global variable is deprecated:
+        deprecation_message = ("use of 'path' global variable is deprecated and will be removed " +
+                               "in a future version of lyse.  Please use lyse.path, which defaults " +
+                               "to sys.argv[1] when scripts are run stand-alone.")
+        sandbox.deprecation_messages['path'] = deprecation_message
+        # Use lyse.path instead:
+        lyse.path = path
+
         # Do not let the modulewatcher unload any modules whilst we're working:
         try:
             with self.modulewatcher.lock:

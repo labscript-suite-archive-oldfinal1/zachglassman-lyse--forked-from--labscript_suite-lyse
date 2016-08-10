@@ -151,8 +151,14 @@ def scientific_notation(x, sigfigs=4, mode='eng'):
             superscript = ''.join(sups.get(char, char) for char in str(exponent))
             result += thinspace + times + thinspace + '10' + superscript
         elif mode == 'eng':
-            prefix = prefixes[exponent]
-            result += hairspace + prefix
+            try:
+                # If our number has an SI prefix then use it
+                prefix = prefixes[exponent]
+                result += hairspace + prefix
+            except KeyError:
+                # Otherwise display in scientific notation
+                superscript = ''.join(sups.get(char, char) for char in str(exponent))
+                result += thinspace + times + thinspace + '10' + superscript
     return result
 
 
@@ -163,7 +169,16 @@ class WebServer(ZMQServer):
         if request_data == 'hello':
             return 'hello'
         elif request_data == 'get dataframe':
-            return app.filebox.shots_model.dataframe
+            # convert_objects() picks fixed datatypes for columns that are
+            # compatible with fixed datatypes, dramatically speeding up
+            # pickling. But we don't impose fixed datatypes earlier than now
+            # because the user is free to use mixed datatypes in a column, and
+            # we won't want to prevent values of a different type being added
+            # in the future. All kwargs False because we don't want to coerce
+            # strings to numbers or anything - just choose the correct
+            # datatype for columns that are already a single datatype:
+            return app.filebox.shots_model.dataframe.convert_objects(
+                       convert_dates=False, convert_numeric=False, convert_timedeltas=False)
         elif isinstance(request_data, dict):
             if 'filepath' in request_data:
                 h5_filepath = shared_drive.path_to_local(request_data['filepath'])
@@ -711,7 +726,7 @@ class RoutineBox(object):
             name_item.setData(new_index, self.ROLE_SORTINDEX)
         self.ui.treeView.sortByColumn(self.COL_NAME, QtCore.Qt.AscendingOrder)
         # Apply new order to our list of routines too:
-        self.routines = [self.routines[i] for i in order]
+        self.routines = [self.routines[order.index(i)] for i in range(len(order))]
 
     def update_select_all_checkstate(self):
         with self.select_all_checkbox_state_changed_disconnected:
@@ -1080,9 +1095,8 @@ class DataFrameModel(QtCore.QObject):
         self._vertheader.setResizeMode(QtGui.QHeaderView.Fixed)
         self._vertheader.setStyleSheet(headerview_style)
         self._header.setStyleSheet(headerview_style)
-        self._header.setStretchLastSection(True)
-
-        self._vertheader.setHighlightSections(False)
+        self._vertheader.setHighlightSections(True)
+        self._vertheader.setClickable(True)
         self._view.setModel(self._model)
         self._view.setHorizontalHeader(self._header)
         self._view.setVerticalHeader(self._vertheader)
@@ -1151,7 +1165,6 @@ class DataFrameModel(QtCore.QObject):
         for name_item in selected_name_items:
             row = name_item.row()
             self._model.removeRow(row)
-        self.update_select_all_checkstate()
 
     def mark_selection_not_done(self):
         selected_indexes = self._view.selectedIndexes()
@@ -1473,44 +1486,53 @@ class FileBox(object):
         h5py._errors.silence_errors()
         n_shots_added = 0
         while True:
-            filepaths = []
-            filepath = self.incoming_queue.get()
-            filepaths.append(filepath)
-            if self.incoming_queue.qsize() == 0:
-                # Wait momentarily in case more arrive so we can batch process them:
-                time.sleep(0.1)
-            while True:
-                try:
-                    filepath = self.incoming_queue.get(False)
-                except Queue.Empty:
-                    break
-                else:
-                    filepaths.append(filepath)
-                    if len(filepaths) >= 5:
+            try:
+                filepaths = []
+                filepath = self.incoming_queue.get()
+                filepaths.append(filepath)
+                if self.incoming_queue.qsize() == 0:
+                    # Wait momentarily in case more arrive so we can batch process them:
+                    time.sleep(0.1)
+                while True:
+                    try:
+                        filepath = self.incoming_queue.get(False)
+                    except Queue.Empty:
                         break
-            logger.info('adding:\n%s' % '\n'.join(filepaths))
-            if n_shots_added == 0:
-                total_shots = self.incoming_queue.qsize() + len(filepaths)
-                self.set_add_shots_progress(1, total_shots)
-            # We open the HDF5 files here outside the GUI thread so as not to hang the GUI:
-            dataframes = []
-            for i, filepath in enumerate(filepaths):
-                dataframe = get_dataframe_from_shot(filepath)
-                dataframes.append(dataframe)
-                n_shots_added += 1
-                shots_remaining = self.incoming_queue.qsize()
-                total_shots = n_shots_added + shots_remaining + len(filepaths) - (i + 1)
-                if i != len(filepaths) - 1:
-                    # Leave the last update until after dataframe concatenation.
-                    # Looks more responsive that way:
-                    self.set_add_shots_progress(n_shots_added, total_shots)
-            new_row_data = concat_with_padding(*dataframes)
-            self.set_add_shots_progress(n_shots_added, total_shots)
-            self.shots_model.add_files(filepaths, new_row_data)
-            if shots_remaining == 0:
-                n_shots_added = 0 # reset our counter for the next batch
-            # Let the analysis loop know to look for new shots:
-            self.analysis_pending.set()
+                    else:
+                        filepaths.append(filepath)
+                        if len(filepaths) >= 5:
+                            break
+                logger.info('adding:\n%s' % '\n'.join(filepaths))
+                if n_shots_added == 0:
+                    total_shots = self.incoming_queue.qsize() + len(filepaths)
+                    self.set_add_shots_progress(1, total_shots)
+
+                # Remove duplicates from the list (preserving order) in case the
+                # client sent the same filepath multiple times:
+                filepaths = sorted(set(filepaths), key=filepaths.index) # Inefficient but readable
+                # We open the HDF5 files here outside the GUI thread so as not to hang the GUI:
+                dataframes = []
+                for i, filepath in enumerate(filepaths):
+                    dataframe = get_dataframe_from_shot(filepath)
+                    dataframes.append(dataframe)
+                    n_shots_added += 1
+                    shots_remaining = self.incoming_queue.qsize()
+                    total_shots = n_shots_added + shots_remaining + len(filepaths) - (i + 1)
+                    if i != len(filepaths) - 1:
+                        # Leave the last update until after dataframe concatenation.
+                        # Looks more responsive that way:
+                        self.set_add_shots_progress(n_shots_added, total_shots)
+                new_row_data = concat_with_padding(*dataframes)
+                self.set_add_shots_progress(n_shots_added, total_shots)
+                self.shots_model.add_files(filepaths, new_row_data)
+                if shots_remaining == 0:
+                    n_shots_added = 0 # reset our counter for the next batch
+                # Let the analysis loop know to look for new shots:
+                self.analysis_pending.set()
+            except Exception:
+                # Keep this incoming loop running at all costs, but make the
+                # otherwise uncaught exception visible to the user:
+                zprocess.raise_exception_in_thread(sys.exc_info())
 
     def analysis_loop(self):
         logger = logging.getLogger('lyse.FileBox.analysis_loop')
