@@ -28,15 +28,15 @@ import types
 
 from zprocess import zmq_get
 
-__version__ = '2.0.0'
+__version__ = '2.1.0'
 
 try:
     from labscript_utils import check_version
 except ImportError:
     raise ImportError('Require labscript_utils > 2.1.0')
 
-# allow pandas v0.15.0 to v0.16.x inclusive
-check_version('pandas', '0.15.0', '0.17')
+# require pandas v0.15.0 up to the next major version
+check_version('pandas', '0.15.0', '1.0')
 
 # If running stand-alone, and not from within lyse, the below two variables
 # will be as follows. Otherwise lyse will override them with spinning_top =
